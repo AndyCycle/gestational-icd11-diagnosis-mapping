@@ -6,15 +6,15 @@ import os
 # --- 配置 ---
 
 # 1. (输入) 映射后的文件路径 (.csv 或 .xlsx)
-MAPPED_FILE_PATH = 'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗编码结果\龙岗分娩记录_清洗地址后_ICD11mapped-20260113.xlsx'
-# 也可以是: 'ICD-API方案/完整测试/checking/mapped_part_1.xlsx'
+MAPPED_FILE_PATH = 'ICD11mapped-20260113.xlsx'
+# 也可以是: 'mapped_part_1.xlsx'
 
-# 2. (输入) 您在上一个脚本中 *处理过* 的原始列名列表
+# 2. (输入) 原始列名列表
 ORIGINAL_COL_NAMES = ["产科合并症", "手术适应症","孕期风险项"]
 # 例如: ["产科合并症", "手术适应症","孕期风险项"]
 
 # 3. (输出) 统计报告的文件名
-OUTPUT_CSV = 'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗编码结果\statistics_report_龙岗-20260113.csv'
+OUTPUT_CSV = 'statistics_report.csv'
 
 # --- 脚本 ---
 

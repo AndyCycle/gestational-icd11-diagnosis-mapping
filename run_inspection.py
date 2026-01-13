@@ -4,10 +4,10 @@ from collections import defaultdict
 import os
 
 # --- 配置 ---
-MAPPED_FILE_PATH = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码/test\检验\merged_output_final_refined-20251222.xlsx'
+MAPPED_FILE_PATH = r'icd11_mapped.xlsx'
 # 必须包含所有参与编码的原始列
 ORIGINAL_COL_NAMES = ["产科合并症", "手术适应症", "孕期风险项"]
-OUTPUT_JSON = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\test\检验\inspection_report.json'
+OUTPUT_JSON = r'inspection_report.json'
 
 def read_data_with_polars(file_path):
     _ , extension = os.path.splitext(file_path)
