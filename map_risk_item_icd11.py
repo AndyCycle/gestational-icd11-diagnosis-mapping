@@ -95,9 +95,9 @@ def process_risk_with_exclusion_logic(row, code_map):
 
 if __name__ == "__main__":
     # 配置路径
-    DATA_FILE_PATH = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗编码结果\龙岗分娩记录_编码后.xlsx'
-    MAPPING_FILE_PATH = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\ICD-API方案\完整测试\孕期风险项coding.csv'
-    OUTPUT_FILE_PATH = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗编码结果\龙岗分娩记录_编码后_riskmapped.xlsx'
+    DATA_FILE_PATH = r'分娩记录_编码后.xlsx'
+    MAPPING_FILE_PATH = r'孕期风险项coding.csv'
+    OUTPUT_FILE_PATH = r'分娩记录_编码后_riskmapped.xlsx'
 
     # 步骤 1: 加载规则
     mapping_dict = load_mapping_file(MAPPING_FILE_PATH)
