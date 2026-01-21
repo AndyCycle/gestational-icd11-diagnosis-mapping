@@ -44,7 +44,12 @@ def load_mapping_file(mapping_path):
 def process_risk_with_exclusion_logic(row, code_map):
     """
     row: 包含多列数据的字典
-    逻辑：针对特定风险项，若手术适应症或产科合并症包含“甲亢、甲减、垂体”，则不进行编码。
+    逻辑：
+    1. 针对“糖尿病、甲状腺”等：若上下文包含“甲亢、甲减”等排除词，则跳过不编码。
+    2. 针对“凶险性前置胎盘，胎盘早剥”：
+       - 若上下文只包含“胎盘早剥” -> JA8C.Z
+       - 若上下文只包含“凶险性前置胎盘” -> JA8A.2|JA8B.1
+       - 若都存在或都不存在 -> 使用原始完整映射
     """
     risk_val = row.get("孕期风险项")
     surgery_val = row.get("手术适应症")
@@ -62,26 +67,57 @@ def process_risk_with_exclusion_logic(row, code_map):
     if not risk_text:
         return ""
 
-    # 定义业务规则：目标项与排除词
-    special_targets = {
+    # --- 规则配置区域 ---
+
+    # 规则1: 甲状腺/糖尿病排除规则
+    thyroid_targets = {
         "无需药物治疗的糖尿病、甲状腺疾病、垂体泌乳素瘤等",
         "需药物治疗的糖尿病、甲状腺疾病、垂体泌乳素瘤"
     }
-    exclusion_keywords = ["甲亢", "甲减", "垂体", "甲"]
+    thyroid_exclusion_keywords = ["甲亢", "甲减", "垂体", "甲"]
+
+    # 规则2: 胎盘特殊处理规则的目标词
+    placenta_target_token = "凶险性前置胎盘，胎盘早剥"
+
+    # --- 开始处理 ---
 
     tokens = [t.strip() for t in risk_text.split('|') if t.strip()]
     mapped_results = []
 
     for token in tokens:
-        # 判定是否触发排除逻辑
-        if token in special_targets:
+        # -------------------------------------------------------
+        # 逻辑 A: 甲状腺/糖尿病 排除检测
+        # -------------------------------------------------------
+        if token in thyroid_targets:
             # 检查上下文中是否存在排除关键词
-            has_exclusion = any(kw in context_text for kw in exclusion_keywords)
+            has_exclusion = any(kw in context_text for kw in thyroid_exclusion_keywords)
             if has_exclusion:
-                # 触发排除：不进行编码，直接跳过该 token
+                # 触发排除：直接跳过该 token，不产生编码
                 continue
 
-        # 正常映射逻辑
+        # -------------------------------------------------------
+        # 逻辑 B: 凶险性前置胎盘与胎盘早剥 动态编码
+        # -------------------------------------------------------
+        if token == placenta_target_token:
+            # 检测上下文
+            has_abruption = "胎盘早剥" in context_text
+            has_previa = "凶险性前置胎盘" in context_text
+
+            # 情况1: 只存在“胎盘早剥” (不存在“凶险性前置胎盘”)
+            if has_abruption and not has_previa:
+                mapped_results.append("JA8C.Z")
+                continue # 已处理，跳过默认映射
+
+            # 情况2: 只存在“凶险性前置胎盘” (不存在“胎盘早剥”)
+            elif has_previa and not has_abruption:
+                mapped_results.append("JA8A.2|JA8B.1")
+                continue # 已处理，跳过默认映射
+
+            # 情况3: 都存在 或 都不存在 -> 继续向下执行，使用 code_map 中的默认值
+
+        # -------------------------------------------------------
+        # 逻辑 C: 常规字典映射 (默认行为)
+        # -------------------------------------------------------
         code = code_map.get(token)
         if code:
             mapped_results.append(code)
