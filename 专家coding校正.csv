@@ -1,5 +1,5 @@
-﻿Chinese_Term,Expert_ICD11_Code
-眼底病变,9B78.1Z
+﻿眼底病变,9B78.1Z
+Chinese_Term,Expert_ICD11_Code
 阴道尿道瘘,GC04.14
 慢性高血压,JA20
 子痫前期并发于慢性高血压,JA21
@@ -72,9 +72,10 @@ prom,JA89.Z
 TAPS,JA8A.0
 帆状胎盘,JA8A.1
 球拍状胎盘,JA8A.1
-凶险性前置胎盘,JA8A.2|JA8B.1
 胎盘粘连,JA8A.2
+凶险性前置胎盘,JA8A.2|JA8B.1
 前置胎盘伴出血,JA8B.1
+胎盘早剥,JA8C.Z
 先兆早产,JA8D.0
 先兆临产,JA8D.Z
 早产,JB00.Z
@@ -98,7 +99,6 @@ TAPS,JA8A.0
 前置血管,JB08.3
 脐带血肿、脐带血管损害,JB08.4
 脐带缠绕伴受压,JB08.5
-脐带扭转,LB03.Y
 脐血流异常,JB08.5
 子宫破裂,JB0A.1
 阴道壁裂伤,JB0A.4
@@ -149,6 +149,7 @@ IgA肾病,JB64.1/4A4Z
 妊娠期发生恶性肿瘤,JB64.Y/2D4Z
 卵巢肿瘤,JB65.Y
 巨大儿,KA22.0
+脐带扭转,LB03.Y
 AIH,QA30.0
 辅助生殖,QA30.12
 IVF妊娠,QA30.12
