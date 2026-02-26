@@ -14,9 +14,9 @@ VOLCENGINE_API_KEY_ENV_NAME = "ARK_API_KEY"
 LLM_MODEL = "doubao-seed-1-6-flash-250828"
 
 # 文件路径
-INPUT_FILE = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗分娩记录_最终合并后带uuid.xlsx'
-OUTPUT_FILE = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗清洗地址\龙岗分娩记录_地址清洗后.xlsx'
-CACHE_DIR = r'E:\文件\研究生\项目\宝安妇幼数据搜索\清洗任务\clean_test\初映射后LLM优化专家编码\龙岗清洗地址\address_cache_temp'
+INPUT_FILE = r'分娩记录_最终合并后带uuid.xlsx'
+OUTPUT_FILE = r'分娩记录_地址清洗后.xlsx'
+CACHE_DIR = r'address_cache_temp'
 
 TARGET_COLUMN = "地址信息"
 NEW_COLUMN = "地址信息_清洗后"
