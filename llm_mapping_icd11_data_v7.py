@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LOCAL_API_URL = "http://localhost:8382/icd/release/11/2025-01/mms/search"
 VOLCENGINE_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 VOLCENGINE_API_KEY_ENV_NAME = "ARK_API_KEY"
-LLM_MODEL = "your_model_endpoint" #e.g. doubao-seed-1-6-flash-250828
+LLM_MODEL = "ep-20260109182535-5j2fq"
 
 # 文件路径配置 (请确认路径无误)
 INPUT_CSV = r'分娩记录_stage1_cleaned.csv'

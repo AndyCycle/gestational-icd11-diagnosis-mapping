@@ -131,9 +131,9 @@ def process_risk_with_exclusion_logic(row, code_map):
 
 if __name__ == "__main__":
     # 配置路径
-    DATA_FILE_PATH = r'分娩记录_编码后.xlsx'
+    DATA_FILE_PATH = r'龙岗编码结果\龙岗分娩记录_编码后.xlsx'
     MAPPING_FILE_PATH = r'孕期风险项coding.csv'
-    OUTPUT_FILE_PATH = r'分娩记录_编码后_riskmapped.xlsx'
+    OUTPUT_FILE_PATH = r'龙岗编码结果\分娩记录_编码后_riskmapped.xlsx'
 
     # 步骤 1: 加载规则
     mapping_dict = load_mapping_file(MAPPING_FILE_PATH)
