@@ -16,8 +16,8 @@ VOLCENGINE_API_KEY_ENV_NAME = "ARK_API_KEY"
 LLM_MODEL = "ep-20260109182535-5j2fq"
 
 # 文件路径配置 (请确认路径无误)
-INPUT_CSV = r'分娩记录_stage1_cleaned.csv'
-OUTPUT_CSV = '分娩记录_编码后.csv'
+INPUT_CSV = r'分娩记录.csv'
+OUTPUT_CSV = '分娩记录-icd11_mapped.csv'
 EXPERT_RULES_FILE = '专家coding校正.csv'
 CACHE_DIR = r'temp_cache'
 
@@ -270,7 +270,9 @@ def process_chunk(chunk_id, df_subset, cache_path, expert_rules_str, progress_ba
 
 if __name__ == '__main__':
     output_dir = os.path.dirname(OUTPUT_CSV)
-    if not os.path.exists(output_dir): os.makedirs(output_dir, exist_ok=True)
+    # 仅当路径字符串不为空且文件夹不存在时才创建
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR, exist_ok=True)
 
     print("正在加载专家映射规则...")
