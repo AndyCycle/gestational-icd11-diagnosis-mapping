@@ -2,8 +2,8 @@ import polars as pl
 import os
 
 # --- 配置区域 ---
-INPUT_FILE = r'icd11_mapped.xlsx'
-OUTPUT_FILE = r'icd11_mapped.xlsx'
+INPUT_FILE = r'0127新增_未清洗样本提取_清洗地址后-icd11_mapped.xlsx'
+OUTPUT_FILE = r'0127新增_未清洗样本提取_清洗地址后-icd11_mapped.xlsx'
 
 COLUMN_PAIRS = [
     ("产科合并症", "产科合并症_ICD11_Code"),
@@ -12,11 +12,11 @@ COLUMN_PAIRS = [
 ]
 
 # 诊断名称：维持【包含匹配】
-TARGET_TERM_KEYWORD = "缺乏"
+TARGET_TERM_KEYWORD = "足月成熟儿"
 
-# 错误编码：恢复【严格匹配】
-WRONG_CODE = "5C51.3"
-CORRECT_CODE = "3A10.00"
+# 错误编码：支持单个字符串（如 "3A50.Z"）或列表（如 ["MB23.Q", "5C53.Y"]）
+WRONG_CODE = ["DD93.0","KA22.2","MB23.Q", "QA47.0Z","QA47.2","None","None of the provided candidates are relevant to 'term infant' (足月成熟儿). The candidates describe unrelated conditions or incorrect gestational age statuses."]
+CORRECT_CODE = ""
 
 # -------------------------------------------------
 # 核心修正逻辑 (Polars 向量化自定义函数)
@@ -24,22 +24,25 @@ CORRECT_CODE = "3A10.00"
 def fix_code_logic(diag_str, code_str):
     if diag_str is None or code_str is None:
         return code_str
-
+    
     diags = [d.strip() for d in str(diag_str).split('|')]
     codes = [c.strip() for c in str(code_str).split('|')]
 
     if len(diags) != len(codes):
         return code_str
 
+    # 转为列表处理
+    wrong_codes = [WRONG_CODE] if isinstance(WRONG_CODE, str) else WRONG_CODE
+
     modified = False
     new_codes = []
     for d, c in zip(diags, codes):
-        if (TARGET_TERM_KEYWORD in d) and (c == WRONG_CODE):
+        if (TARGET_TERM_KEYWORD in d) and (c in wrong_codes):
             new_codes.append(CORRECT_CODE)
             modified = True
         else:
             new_codes.append(c)
-
+    
     return "|".join(new_codes) if modified else code_str
 
 # -------------------------------------------------
@@ -53,7 +56,7 @@ if __name__ == "__main__":
         # 先读取表头获取列名
         header = pl.read_excel(INPUT_FILE, read_options={"n_rows": 1})
         df = pl.read_excel(INPUT_FILE, schema_overrides={col: pl.String for col in header.columns})
-
+        
         total_fixed_count = 0
 
         for diag_col, code_col in COLUMN_PAIRS:
@@ -64,9 +67,18 @@ if __name__ == "__main__":
             print(f"正在检查列对: {diag_col} <-> {code_col} ...")
 
             # 2. 性能优化的关键：预过滤
-            # 只有当编码列中确实包含 WRONG_CODE 时才进行复杂计算
-            mask = df[code_col].str.contains(WRONG_CODE, literal=True).fill_null(False)
-
+            # 只有当编码列中确实包含 WRONG_CODE 中的任意一个时才进行复杂计算
+            wrong_codes = [WRONG_CODE] if isinstance(WRONG_CODE, str) else WRONG_CODE
+            
+            # 使用 | 拼接成正则，如果是列表的话
+            if isinstance(WRONG_CODE, list):
+                # 对特殊字符进行简单转义处理
+                import re as standard_re
+                regex_pattern = "|".join([standard_re.escape(c) for c in WRONG_CODE])
+                mask = df[code_col].str.contains(regex_pattern).fill_null(False)
+            else:
+                mask = df[code_col].str.contains(WRONG_CODE, literal=True).fill_null(False)
+            
             if mask.any():
                 # 记录原始值用于统计
                 original_codes = df.filter(mask)[code_col]
@@ -104,7 +116,7 @@ if __name__ == "__main__":
                     # 展示修改样例
                     diff_mask = updated_values != original_codes
                     examples_df = df.filter(mask).filter(diff_mask).head(5)
-
+                    
                     # 为了方便展示，我们将 original_codes 也加入到这个临时 DF 中
                     # 注意：Polars 这里的 filter(mask和diff_mask) 后索引会重排
                     # 但我们可以直接按行展示关键信息
@@ -123,7 +135,7 @@ if __name__ == "__main__":
         output_dir = os.path.dirname(OUTPUT_FILE)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-
+        
         df.write_excel(OUTPUT_FILE)
         print(f"完成！共修正了 {total_fixed_count} 处真实异常。")
 
