@@ -44,7 +44,7 @@ def process_obstetric_complications(text):
         terms.extend(sub_segments)
 
     filtered_terms = []
-    meaningless_values = ['其他', '其它', '/', '其他 /', '其它 /', '']
+    meaningless_values = ['其他', '其它', '/', '其他 /', '其它 /', '珍贵儿', "社会因素", "足月成熟儿"]
 
     for term in terms:
         term = term.strip()

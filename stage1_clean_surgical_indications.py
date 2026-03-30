@@ -175,7 +175,7 @@ def main(input_file, output_file):
     """主函数，读取、处理并保存数据。"""
     df = pd.read_csv(input_file, low_memory=False)
     column_to_clean = '手术适应症'
-    meaningless_values = ['/', '其他', '其他 /', '无', '其它', '其它 /', "／"]
+    meaningless_values = ['/', '其他', '其他 /', '无', '其它', '其它 /', "／",'珍贵儿', "社会因素", "足月成熟儿"]
 
     if column_to_clean in df.columns:
         print(f"开始清洗列: {column_to_clean}...")
