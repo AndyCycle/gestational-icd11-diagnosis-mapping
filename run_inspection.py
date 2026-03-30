@@ -1,4 +1,4 @@
-﻿import polars as pl
+import polars as pl
 import json
 from collections import defaultdict
 import os
@@ -54,7 +54,9 @@ def create_reverse_map():
     final_report = {code: dict(sorted(terms.items(), key=lambda x: x[1], reverse=True))
                     for code, terms in sorted(reverse_map.items())}
 
-    os.makedirs(os.path.dirname(OUTPUT_JSON), exist_ok=True)
+    output_dir = os.path.dirname(OUTPUT_JSON)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
         json.dump(final_report, f, ensure_ascii=False, indent=2)
     print(f"检验报告已生成: {OUTPUT_JSON}")

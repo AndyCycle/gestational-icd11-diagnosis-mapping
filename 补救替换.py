@@ -1,9 +1,9 @@
-﻿import pandas as pd
+import polars as pl
 import os
 
 # --- 配置区域 ---
-INPUT_FILE = r'龙岗编码结果\补救.xlsx'
-OUTPUT_FILE = r'龙岗编码结果\补救.xlsx'
+INPUT_FILE = r'icd11_mapped.xlsx'
+OUTPUT_FILE = r'icd11_mapped.xlsx'
 
 COLUMN_PAIRS = [
     ("产科合并症", "产科合并症_ICD11_Code"),
@@ -12,72 +12,48 @@ COLUMN_PAIRS = [
 ]
 
 # 诊断名称：维持【包含匹配】
-# 只要单元格文本中包含这个词（例如 "妊娠期胆积淤积综合征"）就算命中
-TARGET_TERM_KEYWORD = "脐带扭转"
+TARGET_TERM_KEYWORD = "缺乏"
 
 # 错误编码：恢复【严格匹配】
-# 只有完全等于 "JA65.0" 才会被替换（"JA65.01" 或 "JA65.0/X" 不会被修改）
-WRONG_CODE = "LB03.Y"
-CORRECT_CODE = "KC20.Z"
+WRONG_CODE = "5C51.3"
+CORRECT_CODE = "3A10.00"
 
 # -------------------------------------------------
-# 核心修正逻辑函数
+# 核心修正逻辑 (Polars 向量化自定义函数)
 # -------------------------------------------------
-def fix_code_alignment(row, diag_col, code_col):
-    # 1. 获取原始值
-    raw_diag = row[diag_col]
-    raw_code = row[code_col]
+def fix_code_logic(diag_str, code_str):
+    if diag_str is None or code_str is None:
+        return code_str
 
-    # 严谨性检查：空值直接返回
-    if pd.isna(raw_diag) or pd.isna(raw_code):
-        return raw_code
+    diags = [d.strip() for d in str(diag_str).split('|')]
+    codes = [c.strip() for c in str(code_str).split('|')]
 
-    # 2. 转字符串并去空
-    diag_str = str(raw_diag).strip()
-    code_str = str(raw_code).strip()
-
-    if not diag_str or not code_str:
-        return raw_code
-
-    # 3. 拆分处理（按竖线拆分）
-    diags = [d.strip() for d in diag_str.split('|')]
-    codes = [c.strip() for c in code_str.split('|')]
-
-    # 严谨性检查：数量不一致跳过，防止错位
     if len(diags) != len(codes):
-        return raw_code
+        return code_str
 
-    is_modified = False
+    modified = False
     new_codes = []
-
-    for i in range(len(diags)):
-        d_term = diags[i]
-        c_code = codes[i]
-
-        # 4. 判定逻辑（关键修改处）
-        # 条件A (诊断): 使用 in (包含匹配)，提高容错率
-        # 条件B (编码): 使用 == (严格匹配)，确保精准
-        if (TARGET_TERM_KEYWORD in d_term) and (c_code == WRONG_CODE):
+    for d, c in zip(diags, codes):
+        if (TARGET_TERM_KEYWORD in d) and (c == WRONG_CODE):
             new_codes.append(CORRECT_CODE)
-            is_modified = True
+            modified = True
         else:
-            new_codes.append(c_code)
+            new_codes.append(c)
 
-    # 5. 返回结果
-    if is_modified:
-        return "|".join(new_codes)
-    else:
-        # 无修改则返回原始对象
-        return raw_code
+    return "|".join(new_codes) if modified else code_str
 
 # -------------------------------------------------
 # 主程序
 # -------------------------------------------------
 if __name__ == "__main__":
-    print(f"正在读取文件: {INPUT_FILE}")
+    print(f"正在读取文件: {INPUT_FILE} (使用 Polars 引擎)...")
 
     try:
-        df = pd.read_excel(INPUT_FILE)
+        # 1. 加载数据 (强制所有列读取为 String 避免类型冲突)
+        # 先读取表头获取列名
+        header = pl.read_excel(INPUT_FILE, read_options={"n_rows": 1})
+        df = pl.read_excel(INPUT_FILE, schema_overrides={col: pl.String for col in header.columns})
+
         total_fixed_count = 0
 
         for diag_col, code_col in COLUMN_PAIRS:
@@ -87,30 +63,68 @@ if __name__ == "__main__":
 
             print(f"正在检查列对: {diag_col} <-> {code_col} ...")
 
-            original_codes = df[code_col].copy()
+            # 2. 性能优化的关键：预过滤
+            # 只有当编码列中确实包含 WRONG_CODE 时才进行复杂计算
+            mask = df[code_col].str.contains(WRONG_CODE, literal=True).fill_null(False)
 
-            # 应用修复
-            df[code_col] = df.apply(lambda row: fix_code_alignment(row, diag_col, code_col), axis=1)
+            if mask.any():
+                # 记录原始值用于统计
+                original_codes = df.filter(mask)[code_col]
 
-            # 统计差异 (使用 fillna 确保对比的严谨性)
-            col_diff = (original_codes.fillna("##NULL##") != df[code_col].fillna("##NULL##"))
-            count = col_diff.sum()
-            total_fixed_count += count
+                # 对选中的行执行修正逻辑
+                updated_values = df.filter(mask).select([
+                    pl.struct([diag_col, code_col]).map_elements(
+                        lambda x: fix_code_logic(x[diag_col], x[code_col]),
+                        return_dtype=pl.String
+                    ).alias(code_col)
+                ])[code_col]
 
-            if count > 0:
-                print(f"  -> 有效修正了 {count} 行数据")
-                # 打印真实修改的样例
-                example_indices = df[col_diff].index[:5]
-                for idx in example_indices:
-                    print(f"    样例 (Row {idx}):")
-                    print(f"      诊断: {df.loc[idx, diag_col]}")
-                    print(f"      原码: {original_codes[idx]}")
-                    print(f"      新码: {df.loc[idx, code_col]}")
+                # 统计有效的修正数量
+                # 注意：Polars map_elements 之后我们要对比具体的字符串变化
+                effective_changes = (updated_values != original_codes).sum()
+                total_fixed_count += effective_changes
+
+                # 更新原 DataFrame
+                # 使用 pl.when().then().otherwise() 实现按条件更新
+                df = df.with_columns(
+                    pl.when(mask)
+                    .then(
+                        pl.struct([diag_col, code_col]).map_elements(
+                            lambda x: fix_code_logic(x[diag_col], x[code_col]),
+                            return_dtype=pl.String
+                        )
+                    )
+                    .otherwise(pl.col(code_col))
+                    .alias(code_col)
+                )
+
+                if effective_changes > 0:
+                    print(f"  -> 有效修正了 {effective_changes} 行数据")
+
+                    # 展示修改样例
+                    diff_mask = updated_values != original_codes
+                    examples_df = df.filter(mask).filter(diff_mask).head(5)
+
+                    # 为了方便展示，我们将 original_codes 也加入到这个临时 DF 中
+                    # 注意：Polars 这里的 filter(mask和diff_mask) 后索引会重排
+                    # 但我们可以直接按行展示关键信息
+                    for i in range(len(examples_df)):
+                        print(f"    样例:")
+                        print(f"      诊断: {examples_df[diag_col][i]}")
+                        print(f"      原码: {original_codes.filter(diff_mask)[i]}")
+                        print(f"      新码: {examples_df[code_col][i]}")
+                else:
+                    print("  -> 预过滤匹配成功但未发现符合条件的子项")
             else:
                 print("  -> 未发现需要修正的数据")
 
+        # 3. 保存
         print(f"正在保存结果到: {OUTPUT_FILE}")
-        df.to_excel(OUTPUT_FILE, index=False)
+        output_dir = os.path.dirname(OUTPUT_FILE)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        df.write_excel(OUTPUT_FILE)
         print(f"完成！共修正了 {total_fixed_count} 处真实异常。")
 
     except Exception as e:
