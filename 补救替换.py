@@ -1,143 +1,238 @@
-import polars as pl
+import argparse
 import os
+import re
 
-# --- 配置区域 ---
-INPUT_FILE = r'0127新增_未清洗样本提取_清洗地址后-icd11_mapped.xlsx'
-OUTPUT_FILE = r'0127新增_未清洗样本提取_清洗地址后-icd11_mapped.xlsx'
+import pandas as pd
 
-COLUMN_PAIRS = [
-    ("产科合并症", "产科合并症_ICD11_Code"),
-    ("手术适应症", "手术适应症_ICD11_Code"),
-    ("孕期风险项", "孕期风险项_ICD11_Code")
-]
 
-# 诊断名称：维持【包含匹配】
-TARGET_TERM_KEYWORD = "足月成熟儿"
+DIAGNOSIS_COLUMN_PATTERN = re.compile(r"diagnosis\d+$", re.IGNORECASE)
+LEGACY_ORIGINAL_COLS = ["产科合并症", "手术适应症", "孕期风险项"]
 
-# 错误编码：支持单个字符串（如 "3A50.Z"）或列表（如 ["MB23.Q", "5C53.Y"]）
-WRONG_CODE = ["DD93.0","KA22.2","MB23.Q", "QA47.0Z","QA47.2","None","None of the provided candidates are relevant to 'term infant' (足月成熟儿). The candidates describe unrelated conditions or incorrect gestational age statuses."]
-CORRECT_CODE = ""
 
-# -------------------------------------------------
-# 核心修正逻辑 (Polars 向量化自定义函数)
-# -------------------------------------------------
-def fix_code_logic(diag_str, code_str):
-    if diag_str is None or code_str is None:
-        return code_str
-    
-    diags = [d.strip() for d in str(diag_str).split('|')]
-    codes = [c.strip() for c in str(code_str).split('|')]
+def read_table(file_path):
+    _, extension = os.path.splitext(file_path.lower())
+    if extension == ".csv":
+        return pd.read_csv(file_path, dtype=str, low_memory=False)
+    if extension in [".xlsx", ".xls"]:
+        return pd.read_excel(file_path, dtype=str)
+    raise ValueError(f"不支持的文件类型: {extension}")
 
-    if len(diags) != len(codes):
-        return code_str
 
-    # 转为列表处理
-    wrong_codes = [WRONG_CODE] if isinstance(WRONG_CODE, str) else WRONG_CODE
+def write_table(df, file_path):
+    _, extension = os.path.splitext(file_path.lower())
+    if extension == ".csv":
+        df.to_csv(file_path, index=False, encoding="utf-8-sig")
+        return
+    if extension in [".xlsx", ".xls"]:
+        df.to_excel(file_path, index=False)
+        return
+    raise ValueError(f"不支持的输出类型: {extension}")
 
-    modified = False
+
+def split_pipe(value):
+    if value is None:
+        return []
+    text = str(value).strip()
+    if text == "" or text.lower() == "nan":
+        return []
+    return [x.strip() for x in text.split("|")]
+
+
+def detect_column_pairs(df):
+    columns = list(df.columns)
+    pairs = []
+    diagnosis_cols = sorted(
+        [c for c in columns if DIAGNOSIS_COLUMN_PATTERN.fullmatch(c)],
+        key=lambda x: int(re.search(r"(\d+)$", x).group(1)),
+    )
+    for col in diagnosis_cols:
+        code_col = f"{col}_ICD11_Code"
+        if code_col in columns:
+            pairs.append((col, code_col))
+    if pairs:
+        return pairs
+
+    for col in LEGACY_ORIGINAL_COLS:
+        code_col = f"{col}_ICD11_Code"
+        if col in columns and code_col in columns:
+            pairs.append((col, code_col))
+    return pairs
+
+
+def normalize_rule_row(row, allow_empty_correct=False):
+    enabled = str(row.get("enabled", "Y")).strip().upper() != "N"
+    term_match_mode = str(row.get("term_match_mode", "exact")).strip().lower()
+    term_keyword = str(row.get("term_keyword", "")).strip()
+    wrong_code = str(row.get("wrong_code", "")).strip()
+    correct_code = str(row.get("correct_code", "")).strip()
+    column_scope = str(row.get("column_scope", "ALL")).strip()
+
+    if term_keyword == "":
+        return None
+    if wrong_code.lower() == "nan":
+        wrong_code = ""
+    if correct_code.lower() == "nan":
+        correct_code = ""
+    if (not allow_empty_correct) and correct_code == "":
+        return None
+    if term_match_mode not in {"exact", "contains"}:
+        term_match_mode = "exact"
+
+    return {
+        "enabled": enabled,
+        "term_match_mode": term_match_mode,
+        "term_keyword": term_keyword,
+        "wrong_code": wrong_code,
+        "correct_code": correct_code,
+        "column_scope": column_scope,
+    }
+
+
+def load_rules(rule_file, allow_empty_correct=False):
+    rule_df = read_table(rule_file)
+    rules = []
+    for _, row in rule_df.iterrows():
+        parsed = normalize_rule_row(row, allow_empty_correct=allow_empty_correct)
+        if parsed is None or not parsed["enabled"]:
+            continue
+        rules.append(parsed)
+    return rules
+
+
+def term_match(term, mode, keyword):
+    if mode == "exact":
+        return term == keyword
+    return keyword in term
+
+
+def apply_rules_to_pair(term_value, code_value, rules_for_col):
+    terms = split_pipe(term_value)
+    codes = split_pipe(code_value)
+    if len(terms) == 0 or len(codes) == 0 or len(terms) != len(codes):
+        return code_value, 0, "LENGTH_MISMATCH_OR_EMPTY"
+
+    changed = 0
     new_codes = []
-    for d, c in zip(diags, codes):
-        if (TARGET_TERM_KEYWORD in d) and (c in wrong_codes):
-            new_codes.append(CORRECT_CODE)
-            modified = True
-        else:
-            new_codes.append(c)
-    
-    return "|".join(new_codes) if modified else code_str
+    for term, code in zip(terms, codes):
+        new_code = code
+        for rule in rules_for_col:
+            if not term_match(term, rule["term_match_mode"], rule["term_keyword"]):
+                continue
+            wrong_code = rule["wrong_code"]
+            if wrong_code != "" and code != wrong_code:
+                continue
+            new_code = rule["correct_code"]
+            break
+        if new_code != code:
+            changed += 1
+        new_codes.append(new_code)
 
-# -------------------------------------------------
-# 主程序
-# -------------------------------------------------
-if __name__ == "__main__":
-    print(f"正在读取文件: {INPUT_FILE} (使用 Polars 引擎)...")
+    if changed == 0:
+        return code_value, 0, "NO_CHANGE"
+    return "|".join(new_codes), changed, "UPDATED"
 
-    try:
-        # 1. 加载数据 (强制所有列读取为 String 避免类型冲突)
-        # 先读取表头获取列名
-        header = pl.read_excel(INPUT_FILE, read_options={"n_rows": 1})
-        df = pl.read_excel(INPUT_FILE, schema_overrides={col: pl.String for col in header.columns})
-        
-        total_fixed_count = 0
 
-        for diag_col, code_col in COLUMN_PAIRS:
-            if diag_col not in df.columns or code_col not in df.columns:
-                print(f"跳过不存在的列对: {diag_col} / {code_col}")
+def filter_rules_by_column(rules, term_col):
+    col_rules = []
+    for rule in rules:
+        scope = rule["column_scope"]
+        if scope.upper() == "ALL" or scope == term_col:
+            col_rules.append(rule)
+    return col_rules
+
+
+def main():
+    parser = argparse.ArgumentParser(description="根据规则文件批量替换 ICD11 编码。")
+    parser.add_argument("--input", default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv", help="输入映射结果文件")
+    parser.add_argument("--output", default="nipt_disgnosis_20251030_icd11_mapped-fixed.csv", help="输出文件")
+    parser.add_argument("--rules", default="fix_rules_template.csv", help="规则文件 CSV/Excel")
+    parser.add_argument("--report", default="fix_apply_report.csv", help="修复明细报告 CSV")
+    parser.add_argument(
+        "--allow-empty-correct",
+        action="store_true",
+        help="允许将编码替换为空（默认关闭，防止误清空编码）",
+    )
+    args = parser.parse_args()
+
+    print(f"读取映射文件: {args.input}")
+    df = read_table(args.input)
+
+    pairs = detect_column_pairs(df)
+    if not pairs:
+        raise ValueError("未检测到可用列对。")
+    print(f"检测到列对: {pairs}")
+
+    print(f"读取规则文件: {args.rules}")
+    rules = load_rules(args.rules, allow_empty_correct=args.allow_empty_correct)
+    if len(rules) == 0:
+        print("未加载到可用规则（可能是 correct_code 还未填写），不执行替换。")
+        write_table(df, args.output)
+        pd.DataFrame(
+            [{"note": "NO_VALID_RULES", "detail": "规则为空或correct_code未填写"}]
+        ).to_csv(args.report, index=False, encoding="utf-8-sig")
+        print(f"已原样输出: {args.output}")
+        print(f"已输出报告: {args.report}")
+        return
+    print(f"有效规则数: {len(rules)}")
+
+    total_changed_items = 0
+    total_changed_rows = 0
+    report_rows = []
+
+    for idx, row in df.iterrows():
+        row_changed = False
+        for term_col, code_col in pairs:
+            rules_for_col = filter_rules_by_column(rules, term_col)
+            if len(rules_for_col) == 0:
                 continue
 
-            print(f"正在检查列对: {diag_col} <-> {code_col} ...")
-
-            # 2. 性能优化的关键：预过滤
-            # 只有当编码列中确实包含 WRONG_CODE 中的任意一个时才进行复杂计算
-            wrong_codes = [WRONG_CODE] if isinstance(WRONG_CODE, str) else WRONG_CODE
-            
-            # 使用 | 拼接成正则，如果是列表的话
-            if isinstance(WRONG_CODE, list):
-                # 对特殊字符进行简单转义处理
-                import re as standard_re
-                regex_pattern = "|".join([standard_re.escape(c) for c in WRONG_CODE])
-                mask = df[code_col].str.contains(regex_pattern).fill_null(False)
-            else:
-                mask = df[code_col].str.contains(WRONG_CODE, literal=True).fill_null(False)
-            
-            if mask.any():
-                # 记录原始值用于统计
-                original_codes = df.filter(mask)[code_col]
-
-                # 对选中的行执行修正逻辑
-                updated_values = df.filter(mask).select([
-                    pl.struct([diag_col, code_col]).map_elements(
-                        lambda x: fix_code_logic(x[diag_col], x[code_col]),
-                        return_dtype=pl.String
-                    ).alias(code_col)
-                ])[code_col]
-
-                # 统计有效的修正数量
-                # 注意：Polars map_elements 之后我们要对比具体的字符串变化
-                effective_changes = (updated_values != original_codes).sum()
-                total_fixed_count += effective_changes
-
-                # 更新原 DataFrame
-                # 使用 pl.when().then().otherwise() 实现按条件更新
-                df = df.with_columns(
-                    pl.when(mask)
-                    .then(
-                        pl.struct([diag_col, code_col]).map_elements(
-                            lambda x: fix_code_logic(x[diag_col], x[code_col]),
-                            return_dtype=pl.String
-                        )
-                    )
-                    .otherwise(pl.col(code_col))
-                    .alias(code_col)
+            old_code = row.get(code_col, "")
+            new_code, changed_items, status = apply_rules_to_pair(
+                row.get(term_col, ""),
+                old_code,
+                rules_for_col,
+            )
+            if changed_items > 0:
+                df.at[idx, code_col] = new_code
+                total_changed_items += changed_items
+                row_changed = True
+                report_rows.append(
+                    {
+                        "row_index": idx,
+                        "column": term_col,
+                        "diagnosis_value": row.get(term_col, ""),
+                        "old_code": old_code,
+                        "new_code": new_code,
+                        "changed_items": changed_items,
+                    }
                 )
+            elif status == "LENGTH_MISMATCH_OR_EMPTY":
+                report_rows.append(
+                    {
+                        "row_index": idx,
+                        "column": term_col,
+                        "diagnosis_value": row.get(term_col, ""),
+                        "old_code": old_code,
+                        "new_code": old_code,
+                        "changed_items": 0,
+                        "note": status,
+                    }
+                )
+        if row_changed:
+            total_changed_rows += 1
 
-                if effective_changes > 0:
-                    print(f"  -> 有效修正了 {effective_changes} 行数据")
+    print(f"修复完成: 修改行数={total_changed_rows}, 修改子项数={total_changed_items}")
+    write_table(df, args.output)
+    print(f"已保存修复结果: {args.output}")
 
-                    # 展示修改样例
-                    diff_mask = updated_values != original_codes
-                    examples_df = df.filter(mask).filter(diff_mask).head(5)
-                    
-                    # 为了方便展示，我们将 original_codes 也加入到这个临时 DF 中
-                    # 注意：Polars 这里的 filter(mask和diff_mask) 后索引会重排
-                    # 但我们可以直接按行展示关键信息
-                    for i in range(len(examples_df)):
-                        print(f"    样例:")
-                        print(f"      诊断: {examples_df[diag_col][i]}")
-                        print(f"      原码: {original_codes.filter(diff_mask)[i]}")
-                        print(f"      新码: {examples_df[code_col][i]}")
-                else:
-                    print("  -> 预过滤匹配成功但未发现符合条件的子项")
-            else:
-                print("  -> 未发现需要修正的数据")
+    report_df = pd.DataFrame(report_rows)
+    report_df.to_csv(args.report, index=False, encoding="utf-8-sig")
+    print(f"已保存修复报告: {args.report}")
 
-        # 3. 保存
-        print(f"正在保存结果到: {OUTPUT_FILE}")
-        output_dir = os.path.dirname(OUTPUT_FILE)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        
-        df.write_excel(OUTPUT_FILE)
-        print(f"完成！共修正了 {total_fixed_count} 处真实异常。")
+    if len(report_df) > 0:
+        print("修复样例:")
+        print(report_df.head(5).to_string(index=False))
 
-    except Exception as e:
-        print(f"发生错误: {e}")
+
+if __name__ == "__main__":
+    main()

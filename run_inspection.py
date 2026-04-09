@@ -1,65 +1,294 @@
-import polars as pl
+import argparse
 import json
-from collections import defaultdict
 import os
+import re
+from collections import Counter, defaultdict
 
-# --- 配置 ---
-MAPPED_FILE_PATH = r'icd11_mapped.xlsx'
-# 必须包含所有参与编码的原始列
-ORIGINAL_COL_NAMES = ["产科合并症", "手术适应症", "孕期风险项"]
-OUTPUT_JSON = r'inspection_report.json'
+import pandas as pd
 
-def read_data_with_polars(file_path):
-    _ , extension = os.path.splitext(file_path)
-    try:
-        if extension == '.csv':
-            return pl.read_csv(file_path, encoding='utf-8-sig', infer_schema_length=0)
-        elif extension in ['.xlsx', '.xls']:
-            # 采用先读一行获取 Schema 的安全策略
-            header_df = pl.read_excel(file_path, read_options={"n_rows": 1})
-            overrides = {col: pl.String for col in header_df.columns}
-            return pl.read_excel(file_path, schema_overrides=overrides)
-    except Exception as e:
-        print(f"读取失败: {e}")
-        return None
 
-def create_reverse_map():
+DIAGNOSIS_COLUMN_PATTERN = re.compile(r"diagnosis\d+$", re.IGNORECASE)
+ICD_CODE_COLUMN_PATTERN = re.compile(r"diagnosis\d+_ICD11_Code$", re.IGNORECASE)
+LEGACY_ORIGINAL_COLS = ["产科合并症", "手术适应症", "孕期风险项"]
+
+
+def read_data(file_path):
+    _, extension = os.path.splitext(file_path.lower())
+    if extension == ".csv":
+        return pd.read_csv(file_path, dtype=str, low_memory=False)
+    if extension in [".xlsx", ".xls"]:
+        return pd.read_excel(file_path, dtype=str)
+    raise ValueError(f"不支持的文件类型: {extension}")
+
+
+def detect_column_pairs(df):
+    columns = list(df.columns)
+    pairs = []
+
+    diagnosis_cols = sorted(
+        [c for c in columns if DIAGNOSIS_COLUMN_PATTERN.fullmatch(c)],
+        key=lambda x: int(re.search(r"(\d+)$", x).group(1)),
+    )
+    for col in diagnosis_cols:
+        code_col = f"{col}_ICD11_Code"
+        if code_col in columns:
+            pairs.append((col, code_col))
+
+    if pairs:
+        return pairs
+
+    for col in LEGACY_ORIGINAL_COLS:
+        code_col = f"{col}_ICD11_Code"
+        if col in columns and code_col in columns:
+            pairs.append((col, code_col))
+    return pairs
+
+
+def split_pipe(value):
+    if value is None:
+        return []
+    text = str(value).strip()
+    if text == "" or text.lower() == "nan":
+        return []
+    return [x.strip() for x in text.split("|") if x.strip()]
+
+
+def build_reverse_map_and_flags(df, column_pairs):
     reverse_map = defaultdict(lambda: defaultdict(int))
-    df = read_data_with_polars(MAPPED_FILE_PATH)
-    if df is None: return
+    pair_counter = Counter()
+    term_to_codes = defaultdict(Counter)
+    flags = []
 
-    # 预先构建映射列关系
-    code_col_map = {orig: f"{orig}_ICD11_Code" for orig in ORIGINAL_COL_NAMES}
+    for row_idx, row in df.iterrows():
+        for term_col, code_col in column_pairs:
+            terms = split_pipe(row.get(term_col))
+            codes = split_pipe(row.get(code_col))
 
-    # 过滤掉不存在的列
-    valid_map = {o: c for o, c in code_col_map.items() if o in df.columns and c in df.columns}
+            if not terms and not codes:
+                continue
 
-    for row in df.iter_rows(named=True):
-        for orig_col, code_col in valid_map.items():
-            orig_val, code_val = row.get(orig_col), row.get(code_col)
-            if not orig_val or not code_val: continue
+            row_key = row.get("uuid", "")
+            row_admission = row.get("admission_date", "")
 
-            # 解析可能存在的多值（用 | 分割）
-            u_terms = [t.strip() for t in str(orig_val).split('|') if t.strip()]
-            u_codes = [c.strip() for c in str(code_val).split('|') if c.strip()]
+            if terms and not codes:
+                flags.append(
+                    {
+                        "row_index": row_idx,
+                        "uuid": row_key,
+                        "admission_date": row_admission,
+                        "column": term_col,
+                        "issue_type": "MISSING_CODE",
+                        "detail": "有诊断但编码为空",
+                        "term_value": "|".join(terms),
+                        "code_value": "",
+                    }
+                )
+                continue
 
-            # 注意：由于“条件映射”可能导致 Term 和 Code 数量不一致（部分 Term 被排除）
-            # 我们这里采用“包含匹配”或“对齐匹配”。为了统计准确，建议对齐
-            if len(u_terms) == len(u_codes):
-                for term, code in zip(u_terms, u_codes):
-                    if "ERROR" not in code:
-                        reverse_map[code][term] += 1
+            if codes and not terms:
+                flags.append(
+                    {
+                        "row_index": row_idx,
+                        "uuid": row_key,
+                        "admission_date": row_admission,
+                        "column": term_col,
+                        "issue_type": "MISSING_TERM",
+                        "detail": "有编码但诊断为空",
+                        "term_value": "",
+                        "code_value": "|".join(codes),
+                    }
+                )
+                continue
 
-    # 排序并保存
-    final_report = {code: dict(sorted(terms.items(), key=lambda x: x[1], reverse=True))
-                    for code, terms in sorted(reverse_map.items())}
+            if len(terms) != len(codes):
+                flags.append(
+                    {
+                        "row_index": row_idx,
+                        "uuid": row_key,
+                        "admission_date": row_admission,
+                        "column": term_col,
+                        "issue_type": "TERM_CODE_LENGTH_MISMATCH",
+                        "detail": f"terms={len(terms)}, codes={len(codes)}",
+                        "term_value": "|".join(terms),
+                        "code_value": "|".join(codes),
+                    }
+                )
+                continue
 
-    output_dir = os.path.dirname(OUTPUT_JSON)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
+            for term, code in zip(terms, codes):
+                term_to_codes[term][code] += 1
+                pair_counter[(term, code)] += 1
+
+                if "ERROR" in code:
+                    flags.append(
+                        {
+                            "row_index": row_idx,
+                            "uuid": row_key,
+                            "admission_date": row_admission,
+                            "column": term_col,
+                            "issue_type": "ERROR_CODE",
+                            "detail": "编码结果包含 ERROR",
+                            "term_value": term,
+                            "code_value": code,
+                        }
+                    )
+                    continue
+
+                if code.strip() == "" or code.lower() in {"none", "nan"}:
+                    flags.append(
+                        {
+                            "row_index": row_idx,
+                            "uuid": row_key,
+                            "admission_date": row_admission,
+                            "column": term_col,
+                            "issue_type": "EMPTY_OR_NONE_CODE",
+                            "detail": "编码为空或None",
+                            "term_value": term,
+                            "code_value": code,
+                        }
+                    )
+                    continue
+
+                reverse_map[code][term] += 1
+
+    for term, code_count_map in term_to_codes.items():
+        if len(code_count_map) > 1:
+            major_code, major_count = code_count_map.most_common(1)[0]
+            for code, count in code_count_map.items():
+                if code != major_code:
+                    flags.append(
+                        {
+                            "row_index": "",
+                            "uuid": "",
+                            "admission_date": "",
+                            "column": "ALL",
+                            "issue_type": "TERM_MULTI_CODE",
+                            "detail": (
+                                f"term={term} 出现多编码；major={major_code}({major_count}) "
+                                f"current={code}({count})"
+                            ),
+                            "term_value": term,
+                            "code_value": code,
+                        }
+                    )
+
+    return reverse_map, pair_counter, term_to_codes, flags
+
+
+def make_term_code_stats(pair_counter):
+    rows = []
+    for (term, code), freq in pair_counter.items():
+        rows.append({"term": term, "code": code, "frequency": freq})
+    stats_df = pd.DataFrame(rows)
+    if not stats_df.empty:
+        stats_df = stats_df.sort_values(["frequency", "term"], ascending=[False, True])
+    return stats_df
+
+
+def make_fix_rules_template(flags):
+    template_rows = []
+    seen = set()
+    for item in flags:
+        issue_type = item["issue_type"]
+        term = item["term_value"]
+        code = item["code_value"]
+
+        if issue_type not in {"ERROR_CODE", "EMPTY_OR_NONE_CODE", "TERM_MULTI_CODE"}:
+            continue
+        if term == "":
+            continue
+
+        key = (term, code)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        template_rows.append(
+            {
+                "enabled": "Y",
+                "term_match_mode": "exact",
+                "term_keyword": term,
+                "wrong_code": code,
+                "correct_code": "",
+                "column_scope": "ALL",
+                "note": issue_type,
+            }
+        )
+
+    if not template_rows:
+        template_rows.append(
+            {
+                "enabled": "Y",
+                "term_match_mode": "exact",
+                "term_keyword": "示例诊断词",
+                "wrong_code": "示例错误编码",
+                "correct_code": "示例正确编码",
+                "column_scope": "ALL",
+                "note": "请按需填写",
+            }
+        )
+    return pd.DataFrame(template_rows)
+
+
+def save_outputs(
+    reverse_map,
+    stats_df,
+    flags_df,
+    template_df,
+    output_json,
+    output_flags_csv,
+    output_stats_csv,
+    output_template_csv,
+):
+    final_report = {
+        code: dict(sorted(terms.items(), key=lambda x: x[1], reverse=True))
+        for code, terms in sorted(reverse_map.items())
+    }
+    with open(output_json, "w", encoding="utf-8") as f:
         json.dump(final_report, f, ensure_ascii=False, indent=2)
-    print(f"检验报告已生成: {OUTPUT_JSON}")
+
+    flags_df.to_csv(output_flags_csv, index=False, encoding="utf-8-sig")
+    stats_df.to_csv(output_stats_csv, index=False, encoding="utf-8-sig")
+    template_df.to_csv(output_template_csv, index=False, encoding="utf-8-sig")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="检查 ICD11 映射结果并生成补救规则模板。")
+    parser.add_argument("--input", default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv", help="映射结果文件")
+    parser.add_argument("--output-json", default="inspection_report.json", help="反查报告 JSON")
+    parser.add_argument("--output-flags", default="inspection_flags.csv", help="异常明细 CSV")
+    parser.add_argument("--output-stats", default="inspection_term_code_stats.csv", help="term-code 频次 CSV")
+    parser.add_argument("--output-template", default="fix_rules_template.csv", help="补救规则模板 CSV")
+    args = parser.parse_args()
+
+    print(f"读取文件: {args.input}")
+    df = read_data(args.input)
+    column_pairs = detect_column_pairs(df)
+    if not column_pairs:
+        raise ValueError("未找到可用列对，请确认存在 diagnosis*_ICD11_Code 或旧结构列。")
+    print(f"检测到列对: {column_pairs}")
+
+    reverse_map, pair_counter, _, flags = build_reverse_map_and_flags(df, column_pairs)
+    stats_df = make_term_code_stats(pair_counter)
+    flags_df = pd.DataFrame(flags)
+    template_df = make_fix_rules_template(flags)
+
+    save_outputs(
+        reverse_map,
+        stats_df,
+        flags_df,
+        template_df,
+        args.output_json,
+        args.output_flags,
+        args.output_stats,
+        args.output_template,
+    )
+
+    print(f"已生成: {args.output_json}")
+    print(f"已生成: {args.output_flags} (共 {len(flags_df)} 条异常)")
+    print(f"已生成: {args.output_stats} (共 {len(stats_df)} 条 term-code 记录)")
+    print(f"已生成: {args.output_template} (共 {len(template_df)} 条建议规则)")
+
 
 if __name__ == "__main__":
-    create_reverse_map()
+    main()
