@@ -12,12 +12,12 @@ ICD_CODE_COLUMN_PATTERN = re.compile(r"diagnosis\d+_ICD11_Code$", re.IGNORECASE)
 LEGACY_ORIGINAL_COLS = ["产科合并症", "手术适应症", "孕期风险项"]
 
 
-def read_data(file_path):
+def read_data(file_path, sheet_name=0):
     _, extension = os.path.splitext(file_path.lower())
     if extension == ".csv":
         return pd.read_csv(file_path, dtype=str, low_memory=False)
     if extension in [".xlsx", ".xls"]:
-        return pd.read_excel(file_path, dtype=str)
+        return pd.read_excel(file_path, dtype=str, sheet_name=sheet_name)
     raise ValueError(f"不支持的文件类型: {extension}")
 
 
@@ -254,15 +254,24 @@ def save_outputs(
 
 def main():
     parser = argparse.ArgumentParser(description="检查 ICD11 映射结果并生成补救规则模板。")
-    parser.add_argument("--input", default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv", help="映射结果文件")
-    parser.add_argument("--output-json", default="inspection_report.json", help="反查报告 JSON")
-    parser.add_argument("--output-flags", default="inspection_flags.csv", help="异常明细 CSV")
-    parser.add_argument("--output-stats", default="inspection_term_code_stats.csv", help="term-code 频次 CSV")
-    parser.add_argument("--output-template", default="fix_rules_template.csv", help="补救规则模板 CSV")
+    parser.add_argument(
+        "-i",
+        "--input",
+        default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv",
+        help="映射结果文件",
+    )
+    parser.add_argument("-s", "--sheet", default=0, help="Excel 工作表名称或索引(从0开始)")
+    parser.add_argument("-j", "--output-json", default="inspection_report.json", help="反查报告 JSON")
+    parser.add_argument("-f", "--output-flags", default="inspection_flags.csv", help="异常明细 CSV")
+    parser.add_argument("-r", "--output-stats", default="inspection_term_code_stats.csv", help="term-code 频次 CSV")
+    parser.add_argument("-t", "--output-template", default="fix_rules_template.csv", help="补救规则模板 CSV")
     args = parser.parse_args()
 
     print(f"读取文件: {args.input}")
-    df = read_data(args.input)
+    sheet_name = args.sheet
+    if isinstance(sheet_name, str) and sheet_name.isdigit():
+        sheet_name = int(sheet_name)
+    df = read_data(args.input, sheet_name=sheet_name)
     column_pairs = detect_column_pairs(df)
     if not column_pairs:
         raise ValueError("未找到可用列对，请确认存在 diagnosis*_ICD11_Code 或旧结构列。")
