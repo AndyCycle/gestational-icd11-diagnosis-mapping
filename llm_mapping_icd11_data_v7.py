@@ -21,8 +21,8 @@ VOLCENGINE_API_KEY_ENV_NAME = "ARK_API_KEY"
 LLM_MODEL = "doubao-seed-1-6-flash-250828"
 
 # 默认参数
-DEFAULT_INPUT_CSV = r"nipt_disgnosis_20251030_stage1.csv"
-DEFAULT_OUTPUT_CSV = r"nipt_disgnosis_20251030_icd11_mapped-20260403.csv"
+DEFAULT_INPUT_CSV = r"分娩记录.xlsx"
+DEFAULT_OUTPUT_CSV = r"分娩记录-icd11_mapped.xlsx"
 DEFAULT_EXPERT_RULES_FILE = "专家coding校正.csv"
 DEFAULT_CACHE_DIR = r"temp_cache"
 DEFAULT_MAX_WORKERS = 40
@@ -724,8 +724,8 @@ def build_diagnosis_cache_path(cache_dir, model_name, expert_rules_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLM ICD-11 映射脚本，兼容 diagnosis1~N 与旧结构列。")
-    parser.add_argument("--input-csv", default=DEFAULT_INPUT_CSV, help="输入CSV路径")
-    parser.add_argument("--output-csv", default=DEFAULT_OUTPUT_CSV, help="输出CSV路径")
+    parser.add_argument("--input-file", dest="input_file", default=DEFAULT_INPUT_CSV, help="输入文件路径(支持.csv或.xlsx)")
+    parser.add_argument("--output-file", dest="output_file", default=DEFAULT_OUTPUT_CSV, help="输出文件路径(支持.csv或.xlsx)")
     parser.add_argument("--expert-rules", default=DEFAULT_EXPERT_RULES_FILE, help="专家规则CSV路径")
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR, help="缓存目录")
     parser.add_argument("--columns", default=None, help="手动指定处理列，逗号分隔；不传则自动检测")
@@ -740,15 +740,15 @@ if __name__ == "__main__":
 
     usage_tracker = UsageTracker(enabled=bool(args.usage_log), path=args.usage_log)
 
-    input_csv = args.input_csv
-    output_csv = args.output_csv
+    input_file = args.input_file
+    output_file = args.output_file
     expert_rules_file = args.expert_rules
     cache_dir = args.cache_dir
     max_workers = max(1, int(args.max_workers))
     enable_common_prefix_cache = not args.disable_common_prefix_cache
     ttl_seconds = max(1, int(args.cache_ttl))
 
-    output_dir = os.path.dirname(output_csv)
+    output_dir = os.path.dirname(output_file)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     if not os.path.exists(cache_dir):
@@ -783,8 +783,11 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
 
-    print(f"正在读取文件: {input_csv} ...")
-    df = pd.read_csv(input_csv, encoding="utf-8-sig", low_memory=False, dtype=str)
+    print(f"正在读取文件: {input_file} ...")
+    if str(input_file).lower().endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(input_file, dtype=str)
+    else:
+        df = pd.read_csv(input_file, encoding="utf-8-sig", low_memory=False, dtype=str)
     columns_to_process = detect_columns_to_process(df, args.columns)
     print(f"本次处理列: {columns_to_process}")
 
@@ -852,7 +855,10 @@ if __name__ == "__main__":
     for col_name, data_list in new_cols_data.items():
         df[col_name] = data_list
 
-    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
-    print(f"成功！结果已保存至: {output_csv}")
+    if str(output_file).lower().endswith(('.xlsx', '.xls')):
+        df.to_excel(output_file, index=False)
+    else:
+        df.to_csv(output_file, index=False, encoding="utf-8-sig")
+    print(f"成功！结果已保存至: {output_file}")
     if usage_tracker is not None:
         usage_tracker.print_summary()
