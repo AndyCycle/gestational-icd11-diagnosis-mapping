@@ -234,6 +234,56 @@ def apply_rules_to_pair(term_value, code_value, rules_for_col):
     return "|".join(new_codes), changed, "UPDATED"
 
 
+def apply_rules_to_mismatch(term_value, code_value, rules_for_col):
+    terms = split_pipe(term_value)
+    codes = split_pipe(code_value)
+    if len(terms) == 0:
+        return code_value, 0, "LENGTH_MISMATCH_OR_EMPTY"
+
+    new_codes = codes.copy()
+    changed = 0
+
+    for rule in rules_for_col:
+        matched_positions = [
+            idx for idx, term in enumerate(terms)
+            if term_match(term, rule["term_match_mode"], rule["normalized_term_keyword"])
+        ]
+        if not matched_positions:
+            continue
+
+        wrong_code = rule["wrong_code"]
+        correct_code = rule["correct_code"]
+
+        if wrong_code != "":
+            replace_budget = len(matched_positions)
+            for idx, code in enumerate(new_codes):
+                if replace_budget <= 0:
+                    break
+                if code != wrong_code:
+                    continue
+                if code == correct_code:
+                    replace_budget -= 1
+                    continue
+                new_codes[idx] = correct_code
+                changed += 1
+                replace_budget -= 1
+            continue
+
+        existing_correct_count = sum(1 for code in new_codes if code == correct_code)
+        missing_count = max(0, len(matched_positions) - existing_correct_count)
+        if missing_count == 0:
+            continue
+
+        for offset, term_pos in enumerate(matched_positions[:missing_count]):
+            insert_at = min(term_pos + offset, len(new_codes))
+            new_codes.insert(insert_at, correct_code)
+            changed += 1
+
+    if changed == 0:
+        return code_value, 0, "LENGTH_MISMATCH_OR_EMPTY"
+    return "|".join(new_codes), changed, "MISMATCH_RULE_UPDATED"
+
+
 def filter_rules_by_column(rules, term_col):
     col_rules = []
     for rule in rules:
@@ -371,18 +421,40 @@ def main():
                     }
                 )
             elif status == "LENGTH_MISMATCH_OR_EMPTY":
-                report_rows.append(
-                    {
-                        "row_index": idx,
-                        "column": term_col,
-                        "diagnosis_value": current_term,
-                        "new_diagnosis_value": current_term,
-                        "old_code": current_code,
-                        "new_code": current_code,
-                        "changed_items": 0,
-                        "note": status,
-                    }
+                mismatch_new_code, mismatch_changed_items, mismatch_status = apply_rules_to_mismatch(
+                    current_term,
+                    current_code,
+                    rules_for_col,
                 )
+                if mismatch_changed_items > 0:
+                    df.at[idx, code_col] = mismatch_new_code
+                    total_changed_items += mismatch_changed_items
+                    row_changed = True
+                    report_rows.append(
+                        {
+                            "row_index": idx,
+                            "column": term_col,
+                            "diagnosis_value": current_term,
+                            "new_diagnosis_value": current_term,
+                            "old_code": current_code,
+                            "new_code": mismatch_new_code,
+                            "changed_items": mismatch_changed_items,
+                            "note": mismatch_status,
+                        }
+                    )
+                else:
+                    report_rows.append(
+                        {
+                            "row_index": idx,
+                            "column": term_col,
+                            "diagnosis_value": current_term,
+                            "new_diagnosis_value": current_term,
+                            "old_code": current_code,
+                            "new_code": current_code,
+                            "changed_items": 0,
+                            "note": status,
+                        }
+                    )
         if row_changed:
             total_changed_rows += 1
 
