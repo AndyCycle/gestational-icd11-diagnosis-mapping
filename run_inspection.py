@@ -10,6 +10,11 @@ import pandas as pd
 DIAGNOSIS_COLUMN_PATTERN = re.compile(r"diagnosis\d+$", re.IGNORECASE)
 ICD_CODE_COLUMN_PATTERN = re.compile(r"diagnosis\d+_ICD11_Code$", re.IGNORECASE)
 LEGACY_ORIGINAL_COLS = ["产科合并症", "手术适应症", "孕期风险项"]
+INVISIBLE_CHAR_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+MULTISPACE_PATTERN = re.compile(r"\s+")
+EDGE_NOISE_PATTERN = re.compile(r"^[\s\.,;:，。；：、\)\]】）]+|[\s\.,;:，。；：、\(\[【（]+$")
+PURE_NOISE_PATTERN = re.compile(r"^[\W_]+$", re.UNICODE)
+EXPLICIT_NOISE_TERMS = {"无"}
 
 
 def read_data(file_path, sheet_name=0):
@@ -53,10 +58,71 @@ def split_pipe(value):
     return [x.strip() for x in text.split("|") if x.strip()]
 
 
+def normalize_term(term):
+    if term is None:
+        return ""
+    text = str(term).strip()
+    if text == "" or text.lower() == "nan":
+        return ""
+    text = INVISIBLE_CHAR_PATTERN.sub("", text)
+    text = MULTISPACE_PATTERN.sub(" ", text)
+
+    previous = None
+    while text != previous:
+        previous = text
+        text = EDGE_NOISE_PATTERN.sub("", text).strip()
+
+    return text
+
+
+def is_noise_term(term):
+    normalized = normalize_term(term)
+    if normalized == "":
+        return True, normalized, "标准化后为空"
+    if normalized in EXPLICIT_NOISE_TERMS:
+        return True, normalized, "显式噪声词"
+    if PURE_NOISE_PATTERN.fullmatch(normalized):
+        return True, normalized, "仅包含标点或噪声字符"
+    return False, normalized, ""
+
+
+def flag_noise_terms(flags, terms, row_idx, row_key, row_admission, term_col, code_value=""):
+    clean_terms = []
+    for term in terms:
+        is_noise, normalized_term, noise_reason = is_noise_term(term)
+        if is_noise:
+            flags.append(
+                {
+                    "row_index": row_idx,
+                    "uuid": row_key,
+                    "admission_date": row_admission,
+                    "column": term_col,
+                    "issue_type": "NOISE_TERM",
+                    "detail": noise_reason,
+                    "term_value": term,
+                    "normalized_term": normalized_term,
+                    "code_value": code_value,
+                    "recommended_code": "",
+                    "recommended_code_frequency": 0,
+                }
+            )
+            continue
+        clean_terms.append(term)
+    return clean_terms
+
+
+def get_recommended_code(term_key, term_to_codes):
+    code_count_map = term_to_codes.get(term_key)
+    if not code_count_map:
+        return "", 0
+    return code_count_map.most_common(1)[0]
+
+
 def build_reverse_map_and_flags(df, column_pairs):
     reverse_map = defaultdict(lambda: defaultdict(int))
     pair_counter = Counter()
     term_to_codes = defaultdict(Counter)
+    term_display_counter = defaultdict(Counter)
     flags = []
 
     for row_idx, row in df.iterrows():
@@ -69,8 +135,12 @@ def build_reverse_map_and_flags(df, column_pairs):
 
             row_key = row.get("uuid", "")
             row_admission = row.get("admission_date", "")
+            original_terms = terms
 
             if terms and not codes:
+                terms = flag_noise_terms(flags, terms, row_idx, row_key, row_admission, term_col)
+                if not terms:
+                    continue
                 flags.append(
                     {
                         "row_index": row_idx,
@@ -100,6 +170,8 @@ def build_reverse_map_and_flags(df, column_pairs):
                 )
                 continue
 
+            if len(original_terms) != len(codes):
+                terms = flag_noise_terms(flags, original_terms, row_idx, row_key, row_admission, term_col)
             if len(terms) != len(codes):
                 flags.append(
                     {
@@ -116,8 +188,30 @@ def build_reverse_map_and_flags(df, column_pairs):
                 continue
 
             for term, code in zip(terms, codes):
-                term_to_codes[term][code] += 1
-                pair_counter[(term, code)] += 1
+                is_noise, normalized_term, noise_reason = is_noise_term(term)
+                if is_noise:
+                    flags.append(
+                        {
+                            "row_index": row_idx,
+                            "uuid": row_key,
+                            "admission_date": row_admission,
+                            "column": term_col,
+                            "issue_type": "NOISE_TERM",
+                            "detail": noise_reason,
+                            "term_value": term,
+                            "normalized_term": normalized_term,
+                            "code_value": code,
+                            "recommended_code": "",
+                            "recommended_code_frequency": 0,
+                        }
+                    )
+                    continue
+                if "ERROR" not in code and code.strip() != "" and code.lower() not in {"none", "nan"}:
+                    term_to_codes[normalized_term][code] += 1
+                    term_display_counter[normalized_term][term] += 1
+                    pair_counter[(normalized_term, code)] += 1
+
+                recommended_code, recommended_count = get_recommended_code(normalized_term, term_to_codes)
 
                 if "ERROR" in code:
                     flags.append(
@@ -129,7 +223,10 @@ def build_reverse_map_and_flags(df, column_pairs):
                             "issue_type": "ERROR_CODE",
                             "detail": "编码结果包含 ERROR",
                             "term_value": term,
+                            "normalized_term": normalized_term,
                             "code_value": code,
+                            "recommended_code": recommended_code,
+                            "recommended_code_frequency": recommended_count,
                         }
                     )
                     continue
@@ -144,16 +241,20 @@ def build_reverse_map_and_flags(df, column_pairs):
                             "issue_type": "EMPTY_OR_NONE_CODE",
                             "detail": "编码为空或None",
                             "term_value": term,
+                            "normalized_term": normalized_term,
                             "code_value": code,
+                            "recommended_code": recommended_code,
+                            "recommended_code_frequency": recommended_count,
                         }
                     )
                     continue
 
-                reverse_map[code][term] += 1
+                reverse_map[code][normalized_term] += 1
 
     for term, code_count_map in term_to_codes.items():
         if len(code_count_map) > 1:
             major_code, major_count = code_count_map.most_common(1)[0]
+            display_term = term_display_counter[term].most_common(1)[0][0]
             for code, count in code_count_map.items():
                 if code != major_code:
                     flags.append(
@@ -167,8 +268,11 @@ def build_reverse_map_and_flags(df, column_pairs):
                                 f"term={term} 出现多编码；major={major_code}({major_count}) "
                                 f"current={code}({count})"
                             ),
-                            "term_value": term,
+                            "term_value": display_term,
+                            "normalized_term": term,
                             "code_value": code,
+                            "recommended_code": major_code,
+                            "recommended_code_frequency": major_count,
                         }
                     )
 
@@ -178,10 +282,10 @@ def build_reverse_map_and_flags(df, column_pairs):
 def make_term_code_stats(pair_counter):
     rows = []
     for (term, code), freq in pair_counter.items():
-        rows.append({"term": term, "code": code, "frequency": freq})
+        rows.append({"normalized_term": term, "code": code, "frequency": freq})
     stats_df = pd.DataFrame(rows)
     if not stats_df.empty:
-        stats_df = stats_df.sort_values(["frequency", "term"], ascending=[False, True])
+        stats_df = stats_df.sort_values(["frequency", "normalized_term"], ascending=[False, True])
     return stats_df
 
 
@@ -190,8 +294,9 @@ def make_fix_rules_template(flags):
     seen = set()
     for item in flags:
         issue_type = item["issue_type"]
-        term = item["term_value"]
+        term = item.get("normalized_term") or item["term_value"]
         code = item["code_value"]
+        recommended_code = item.get("recommended_code", "")
 
         if issue_type not in {"ERROR_CODE", "EMPTY_OR_NONE_CODE", "TERM_MULTI_CODE"}:
             continue
@@ -209,7 +314,7 @@ def make_fix_rules_template(flags):
                 "term_match_mode": "exact",
                 "term_keyword": term,
                 "wrong_code": code,
-                "correct_code": "",
+                "correct_code": recommended_code,
                 "column_scope": "ALL",
                 "note": issue_type,
             }

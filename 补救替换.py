@@ -7,6 +7,11 @@ import pandas as pd
 
 DIAGNOSIS_COLUMN_PATTERN = re.compile(r"diagnosis\d+$", re.IGNORECASE)
 LEGACY_ORIGINAL_COLS = ["产科合并症", "手术适应症", "孕期风险项"]
+INVISIBLE_CHAR_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+MULTISPACE_PATTERN = re.compile(r"\s+")
+EDGE_NOISE_PATTERN = re.compile(r"^[\s\.,;:，。；：、\)\]】）]+|[\s\.,;:，。；：、\(\[【（]+$")
+PURE_NOISE_PATTERN = re.compile(r"^[\W_]+$", re.UNICODE)
+EXPLICIT_NOISE_TERMS = {"无"}
 
 
 def read_table(file_path):
@@ -29,6 +34,16 @@ def write_table(df, file_path):
     raise ValueError(f"不支持的输出类型: {extension}")
 
 
+def build_default_output_path(input_path):
+    base, extension = os.path.splitext(input_path)
+    return f"{base}-fixed{extension}"
+
+
+def build_default_report_path(input_path):
+    base, _ = os.path.splitext(input_path)
+    return f"{base}-fix_apply_report.csv"
+
+
 def split_pipe(value):
     if value is None:
         return []
@@ -36,6 +51,34 @@ def split_pipe(value):
     if text == "" or text.lower() == "nan":
         return []
     return [x.strip() for x in text.split("|")]
+
+
+def normalize_term(term):
+    if term is None:
+        return ""
+    text = str(term).strip()
+    if text == "" or text.lower() == "nan":
+        return ""
+    text = INVISIBLE_CHAR_PATTERN.sub("", text)
+    text = MULTISPACE_PATTERN.sub(" ", text)
+
+    previous = None
+    while text != previous:
+        previous = text
+        text = EDGE_NOISE_PATTERN.sub("", text).strip()
+
+    return text
+
+
+def is_noise_term(term):
+    normalized = normalize_term(term)
+    if normalized == "":
+        return True, normalized, "标准化后为空"
+    if normalized in EXPLICIT_NOISE_TERMS:
+        return True, normalized, "显式噪声词"
+    if PURE_NOISE_PATTERN.fullmatch(normalized):
+        return True, normalized, "仅包含标点或噪声字符"
+    return False, normalized, ""
 
 
 def detect_column_pairs(df):
@@ -77,11 +120,15 @@ def normalize_rule_row(row, allow_empty_correct=False):
         return None
     if term_match_mode not in {"exact", "contains"}:
         term_match_mode = "exact"
+    normalized_term_keyword = normalize_term(term_keyword)
+    if normalized_term_keyword == "":
+        return None
 
     return {
         "enabled": enabled,
         "term_match_mode": term_match_mode,
         "term_keyword": term_keyword,
+        "normalized_term_keyword": normalized_term_keyword,
         "wrong_code": wrong_code,
         "correct_code": correct_code,
         "column_scope": column_scope,
@@ -100,9 +147,64 @@ def load_rules(rule_file, allow_empty_correct=False):
 
 
 def term_match(term, mode, keyword):
+    normalized_term = normalize_term(term)
+    normalized_keyword = normalize_term(keyword)
     if mode == "exact":
-        return term == keyword
-    return keyword in term
+        return normalized_term == normalized_keyword
+    return normalized_keyword in normalized_term
+
+
+def remove_noise_from_pair(term_value, code_value):
+    terms = split_pipe(term_value)
+    codes = split_pipe(code_value)
+    if len(terms) == 0 and len(codes) == 0:
+        return term_value, code_value, 0, "EMPTY_PAIR", []
+    if len(terms) == 0:
+        return term_value, code_value, 0, "LENGTH_MISMATCH_OR_EMPTY", []
+
+    if len(terms) == len(codes):
+        kept_terms = []
+        kept_codes = []
+        removed_items = []
+        for term, code in zip(terms, codes):
+            is_noise, normalized_term, reason = is_noise_term(term)
+            if is_noise:
+                removed_items.append(
+                    {
+                        "term": term,
+                        "normalized_term": normalized_term,
+                        "code": code,
+                        "reason": reason,
+                    }
+                )
+                continue
+            kept_terms.append(term)
+            kept_codes.append(code)
+
+        if not removed_items:
+            return term_value, code_value, 0, "NO_NOISE", []
+        return "|".join(kept_terms), "|".join(kept_codes), len(removed_items), "NOISE_REMOVED", removed_items
+
+    filtered_terms = []
+    removed_items = []
+    for term in terms:
+        is_noise, normalized_term, reason = is_noise_term(term)
+        if is_noise:
+            removed_items.append(
+                {
+                    "term": term,
+                    "normalized_term": normalized_term,
+                    "code": "",
+                    "reason": reason,
+                }
+            )
+            continue
+        filtered_terms.append(term)
+
+    if len(filtered_terms) == len(codes) and removed_items:
+        return "|".join(filtered_terms), code_value, len(removed_items), "NOISE_REMOVED", removed_items
+
+    return term_value, code_value, 0, "LENGTH_MISMATCH_OR_EMPTY", []
 
 
 def apply_rules_to_pair(term_value, code_value, rules_for_col):
@@ -116,7 +218,7 @@ def apply_rules_to_pair(term_value, code_value, rules_for_col):
     for term, code in zip(terms, codes):
         new_code = code
         for rule in rules_for_col:
-            if not term_match(term, rule["term_match_mode"], rule["term_keyword"]):
+            if not term_match(term, rule["term_match_mode"], rule["normalized_term_keyword"]):
                 continue
             wrong_code = rule["wrong_code"]
             if wrong_code != "" and code != wrong_code:
@@ -143,16 +245,40 @@ def filter_rules_by_column(rules, term_col):
 
 def main():
     parser = argparse.ArgumentParser(description="根据规则文件批量替换 ICD11 编码。")
-    parser.add_argument("--input", default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv", help="输入映射结果文件")
-    parser.add_argument("--output", default="nipt_disgnosis_20251030_icd11_mapped-fixed.csv", help="输出文件")
-    parser.add_argument("--rules", default="fix_rules_template.csv", help="规则文件 CSV/Excel")
-    parser.add_argument("--report", default="fix_apply_report.csv", help="修复明细报告 CSV")
+    parser.add_argument(
+        "-i",
+        "--input",
+        default="nipt_disgnosis_20251030_icd11_mapped-20260403.csv",
+        help="输入映射结果文件",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="",
+        help="输出文件；未提供时默认在输入文件名后追加 -fixed",
+    )
+    parser.add_argument(
+        "-r",
+        "--rules",
+        default="fix_rules_template.csv",
+        help="规则文件 CSV/Excel",
+    )
+    parser.add_argument(
+        "-p",
+        "--report",
+        default="",
+        help="修复明细报告 CSV；未提供时默认基于输入文件名生成",
+    )
     parser.add_argument(
         "--allow-empty-correct",
         action="store_true",
         help="允许将编码替换为空（默认关闭，防止误清空编码）",
     )
     args = parser.parse_args()
+    if not args.output:
+        args.output = build_default_output_path(args.input)
+    if not args.report:
+        args.report = build_default_report_path(args.input)
 
     print(f"读取映射文件: {args.input}")
     df = read_table(args.input)
@@ -165,15 +291,9 @@ def main():
     print(f"读取规则文件: {args.rules}")
     rules = load_rules(args.rules, allow_empty_correct=args.allow_empty_correct)
     if len(rules) == 0:
-        print("未加载到可用规则（可能是 correct_code 还未填写），不执行替换。")
-        write_table(df, args.output)
-        pd.DataFrame(
-            [{"note": "NO_VALID_RULES", "detail": "规则为空或correct_code未填写"}]
-        ).to_csv(args.report, index=False, encoding="utf-8-sig")
-        print(f"已原样输出: {args.output}")
-        print(f"已输出报告: {args.report}")
-        return
-    print(f"有效规则数: {len(rules)}")
+        print("未加载到可用规则（可能是 correct_code 还未填写），仅执行纯噪声剔除。")
+    else:
+        print(f"有效规则数: {len(rules)}")
 
     total_changed_items = 0
     total_changed_rows = 0
@@ -182,14 +302,56 @@ def main():
     for idx, row in df.iterrows():
         row_changed = False
         for term_col, code_col in pairs:
+            original_term = row.get(term_col, "")
+            old_code = row.get(code_col, "")
+            cleaned_term, cleaned_code, noise_removed_count, noise_status, removed_items = remove_noise_from_pair(
+                original_term,
+                old_code,
+            )
+            current_term = cleaned_term
+            current_code = cleaned_code
+
+            if noise_removed_count > 0:
+                df.at[idx, term_col] = cleaned_term
+                df.at[idx, code_col] = cleaned_code
+                total_changed_items += noise_removed_count
+                row_changed = True
+                report_rows.append(
+                    {
+                        "row_index": idx,
+                        "column": term_col,
+                        "diagnosis_value": original_term,
+                        "new_diagnosis_value": cleaned_term,
+                        "old_code": old_code,
+                        "new_code": cleaned_code,
+                        "changed_items": noise_removed_count,
+                        "note": "NOISE_REMOVED",
+                        "removed_terms": "|".join(item["term"] for item in removed_items),
+                        "removed_codes": "|".join(item["code"] for item in removed_items),
+                    }
+                )
+            elif noise_status == "LENGTH_MISMATCH_OR_EMPTY":
+                report_rows.append(
+                    {
+                        "row_index": idx,
+                        "column": term_col,
+                        "diagnosis_value": original_term,
+                        "new_diagnosis_value": original_term,
+                        "old_code": old_code,
+                        "new_code": old_code,
+                        "changed_items": 0,
+                        "note": noise_status,
+                    }
+                )
+                continue
+
             rules_for_col = filter_rules_by_column(rules, term_col)
             if len(rules_for_col) == 0:
                 continue
 
-            old_code = row.get(code_col, "")
             new_code, changed_items, status = apply_rules_to_pair(
-                row.get(term_col, ""),
-                old_code,
+                current_term,
+                current_code,
                 rules_for_col,
             )
             if changed_items > 0:
@@ -200,10 +362,12 @@ def main():
                     {
                         "row_index": idx,
                         "column": term_col,
-                        "diagnosis_value": row.get(term_col, ""),
-                        "old_code": old_code,
+                        "diagnosis_value": current_term,
+                        "new_diagnosis_value": current_term,
+                        "old_code": current_code,
                         "new_code": new_code,
                         "changed_items": changed_items,
+                        "note": "RULE_UPDATED",
                     }
                 )
             elif status == "LENGTH_MISMATCH_OR_EMPTY":
@@ -211,9 +375,10 @@ def main():
                     {
                         "row_index": idx,
                         "column": term_col,
-                        "diagnosis_value": row.get(term_col, ""),
-                        "old_code": old_code,
-                        "new_code": old_code,
+                        "diagnosis_value": current_term,
+                        "new_diagnosis_value": current_term,
+                        "old_code": current_code,
+                        "new_code": current_code,
                         "changed_items": 0,
                         "note": status,
                     }
