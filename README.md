@@ -26,6 +26,7 @@
 - `tqdm`
 - `matplotlib`
 - `openpyxl`
+- `jieba`
 
 外部依赖：
 
@@ -40,11 +41,12 @@
 
 - [llm_mapping_icd11_data_v7.py](./llm_mapping_icd11_data_v7.py)  
 主映射脚本，负责调用 LLM 和 ICD-11 API。
-- `stage1_clean_20250805.py`  
-统一预清洗入口。
-- `stage1_clean_obstetric_complications.py`
-- `stage1_clean_surgical_indications.py`
-- `stage1_clean_pregnancy_risks.py`
+- `stage1_clean_jieba.py`  
+Step1 统一预清洗入口。`手术适应症`、`产科合并症` 使用 jieba 分词清洗，`孕期风险项` 保留原风险项清洗逻辑，并兼容 `diagnosis1 ~ diagnosisN`。
+- `stage1_clean_pregnancy_risks.py`  
+孕期风险项原始清洗逻辑，供 `stage1_clean_jieba.py` 复用。
+- `archive/`  
+旧版 step1 主流程和旧版 `手术适应症`、`产科合并症` 专用清洗脚本归档目录。
 - [map_risk_item_icd11.py](./map_risk_item_icd11.py)  
 孕期风险项专项映射。
 
@@ -80,8 +82,15 @@ inspection 生成后人工维护的补救替换规则。
 ### 1. 数据预清洗
 
 ```bash
-python stage1_clean_20250805.py 原始文件.csv 清洗后文件.csv
+python stage1_clean_jieba.py 原始文件.csv 清洗后文件.csv
 ```
+
+Step1 当前处理规则：
+
+- `手术适应症`：使用 jieba 分词、括号外分隔、问号/空格隔断、连接词拆分和无意义词过滤
+- `产科合并症`：使用同一套 jieba 诊断分词逻辑
+- `孕期风险项`：保留原有按颜色标记和系统疾病前缀处理的风险项清洗逻辑
+- `diagnosis1 ~ diagnosisN`：使用 jieba 诊断分词逻辑
 
 ### 2. LLM 自动编码
 
@@ -282,3 +291,26 @@ python 查询疾病编码样本.py -i 编码结果.csv -c 5B81.Z -k 妊娠合并
 2. inspection、补救、全局替换最好始终围绕同一个最新输出文件继续迭代
 3. 如果某个问题主要表现为 diagnosis 串黏连，不要只堆编码规则，应回到清洗或切分阶段修复
 4. 若在 Linux 环境绘图，需确认系统安装了支持中文的字体
+
+## 流程图
+
+```mermaid
+flowchart TD
+    A[原始 CSV 或 Excel] --> B[Step1: stage1_clean_jieba.py]
+    B --> C{列类型}
+    C -->|手术适应症| D[jieba 诊断分词清洗]
+    C -->|产科合并症| D
+    C -->|diagnosis1 ~ diagnosisN| D
+    C -->|孕期风险项| E[原风险项清洗逻辑]
+    D --> F[清洗后文件]
+    E --> F
+    F --> G[LLM + ICD-11 API 自动编码]
+    G --> H[inspection 异常巡检]
+    H --> I{是否需要修正}
+    I -->|term 级错误| J[补救替换.py]
+    I -->|全局旧码错误| K[全局替换编码.py]
+    I -->|无需修正| L[统计与绘图]
+    J --> H
+    K --> H
+    H --> L
+```
